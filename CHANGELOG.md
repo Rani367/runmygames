@@ -29,7 +29,11 @@ First public release.
 - Automatic renderer switching after a crash no longer loops between renderers.
 - The per-game Retina override can be reset back to the global default.
 - Launchers created from the app point at the right binary and report errors instead of failing silently.
-- A race at startup that could close Steam automatically right after it opened.
+- A race right after Steam starts that could stop RunMyGames from closing Steam once you quit the game.
+- Counter-Strike 2 and other Source 2 games are no longer mistaken for their developer console tool.
+- Artwork from newer Steam versions (`library_capsule.jpg`) is found, and wide artwork no longer spills over
+  neighboring cards.
+- Retina settings no longer rewrite the registry on every launch.
 - A corrupt `localconfig.vdf` for one Steam account no longer blocks the others.
 - Logs are rotated instead of growing forever.
 

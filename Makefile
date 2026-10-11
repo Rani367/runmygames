@@ -69,7 +69,7 @@ dist: app
 	@echo "Built $(ZIP)"
 
 install: app
-	RMG_INSTALL_FROM=$(APP) RMG_SKIP_ENGINE=$(SKIP_ENGINE) bash install.sh
+	RMG_INSTALL_FROM=$(APP) RMG_SKIP_ENGINE=$(SKIP_ENGINE) RMG_NO_OPEN=1 bash install.sh
 
 # Packages the engine installed on this Mac for a GitHub release (see engine/package-engine.sh).
 release-engine:
