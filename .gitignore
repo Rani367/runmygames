@@ -1,0 +1,8 @@
+# Build output
+app/.build/
+build/
+dist/
+.swiftpm/
+*.xcodeproj/
+xcuserdata/
+.DS_Store
