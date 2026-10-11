@@ -14,7 +14,7 @@ struct RunMyGamesApp: App {
                 .onAppear {
                     model.refresh()
                     model.startPolling()
-                    DevSnapshot.scheduleIfRequested()
+                    DevSnapshot.scheduleIfRequested(model)
                 }
         }
         .commands {
@@ -145,19 +145,25 @@ struct StatusBar: View {
 
 /// Developer aid: `RMG_SNAPSHOT=/path/shot.png` renders the main window to a PNG a few
 /// seconds after launch (README screenshots, visual checks without screen-recording access).
-/// `RMG_SNAPSHOT_QUIT=1` quits afterwards.
+/// `RMG_SNAPSHOT_QUIT=1` quits afterwards; `RMG_SNAPSHOT_EDIT=<appid>` shows that game's settings.
 enum DevSnapshot {
-    @MainActor static func scheduleIfRequested() {
+    @MainActor static func scheduleIfRequested(_ model: AppModel) {
         let env = ProcessInfo.processInfo.environment
         guard let path = env["RMG_SNAPSHOT"] else { return }
         let delay = Double(env["RMG_SNAPSHOT_DELAY"] ?? "") ?? 4
+        if let id = env["RMG_SNAPSHOT_EDIT"].flatMap(Int.init) {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay / 2) {
+                model.editing = model.games.first { $0.id == id }
+            }
+        }
         DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
-            guard let window = NSApp.windows.first(where: { $0.isVisible && $0.contentView != nil }),
+            guard let main = NSApp.windows.first(where: { $0.isVisible && $0.contentView != nil }),
+                  case let window = main.attachedSheet ?? main,
                   let view = window.contentView?.superview ?? window.contentView,
                   let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { return }
             view.cacheDisplay(in: view.bounds, to: rep)
             try? rep.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: path))
-            if env["RMG_SNAPSHOT_QUIT"] == "1" { NSApp.terminate(nil) }
+            if env["RMG_SNAPSHOT_QUIT"] == "1" { exit(0) } // terminate() waits for open sheets
         }
     }
 }

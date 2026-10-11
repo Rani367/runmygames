@@ -2,6 +2,12 @@ import AppKit
 import ImageIO
 import RMGCore
 
+/// A decoded image handed out of the cache. NSImage is only Sendable in newer SDKs; these are
+/// never mutated after decoding, so sharing them across threads is safe.
+struct DecodedImage: @unchecked Sendable {
+    let image: NSImage
+}
+
 /// Decoded, downscaled artwork shared by every card. Loading happens off the main thread and
 /// only once per image, so scrolling and hovering never touch the disk or network.
 actor ImageCache {
@@ -11,9 +17,9 @@ actor ImageCache {
     private var failedRemote = Set<URL>()
 
     /// Steam's cached artwork if there is any, else the public CDN.
-    func artwork(id: Int, local: URL?, maxPixel: Int = 600) async -> NSImage? {
+    func artwork(id: Int, local: URL?, maxPixel: Int = 600) async -> DecodedImage? {
         let key = "\(id)|\(local?.path ?? "cdn")" as NSString
-        if let hit = cache.object(forKey: key) { return hit }
+        if let hit = cache.object(forKey: key) { return DecodedImage(image: hit) }
         var image: NSImage?
         if let local { image = Self.decode(try? Data(contentsOf: local), maxPixel: maxPixel) }
         if image == nil {
@@ -25,8 +31,9 @@ actor ImageCache {
                 }
             }
         }
-        if let image { cache.setObject(image, forKey: key) }
-        return image
+        guard let image else { return nil }
+        cache.setObject(image, forKey: key)
+        return DecodedImage(image: image)
     }
 
     private static func decode(_ data: Data?, maxPixel: Int) -> NSImage? {

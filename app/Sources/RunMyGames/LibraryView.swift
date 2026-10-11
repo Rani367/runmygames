@@ -230,7 +230,7 @@ struct ArtworkView: View {
             .clipped()
             .task(id: local) {
                 let img = await ImageCache.shared.artwork(id: id, local: local)
-                withAnimation(.easeIn(duration: 0.15)) { image = img }
+                withAnimation(.easeIn(duration: 0.15)) { image = img?.image }
             }
     }
 
