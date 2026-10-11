@@ -102,7 +102,6 @@ public struct EngineInstaller: Sendable {
         let label = "Wine engine \(m.build)"
         let file: URL
         if let local {
-            progress(.installing(label))
             guard try Downloader.sha256(of: local).caseInsensitiveCompare(m.sha256) == .orderedSame else {
                 throw RMGError.failed("\(local.lastPathComponent) does not match the engine this version of RunMyGames expects (\(m.build)).")
             }

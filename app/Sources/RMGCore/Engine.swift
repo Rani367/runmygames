@@ -79,10 +79,11 @@ public struct Engine: Sendable {
         return env
     }
 
-    /// Starts a Wine process. `wait` blocks until it exits.
+    /// Starts a Wine process. `wait` blocks until it exits. Output goes to `log`, to this
+    /// process's own stdout/stderr with `inheritOutput` (the `rmg wine` passthrough), or nowhere.
     @discardableResult
     public func run(_ args: [String], env extra: [String: String] = [:], wait: Bool = true,
-                    log: URL? = nil, cwd: URL? = nil) throws -> Process {
+                    log: URL? = nil, cwd: URL? = nil, inheritOutput: Bool = false) throws -> Process {
         let p = Process()
         p.executableURL = loader
         p.arguments = args
@@ -98,7 +99,7 @@ public struct Engine: Sendable {
             h.seekToEndOfFile()
             p.standardOutput = h
             p.standardError = h
-        } else {
+        } else if !inheritOutput {
             p.standardOutput = FileHandle.nullDevice
             p.standardError = FileHandle.nullDevice
         }

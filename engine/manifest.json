@@ -3,8 +3,8 @@
     "name": "wine-cx-26.3.0",
     "build": "26.3.0-1",
     "url": "https://github.com/Rani367/runmygames/releases/download/engine-26.3.0-1/rmg-engine-wine-cx-26.3.0-1.tar.xz",
-    "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
-    "size": 0
+    "sha256": "66081017561805005156ea834bce69d73cd6a602c9559e9a73841189b137b140",
+    "size": 94306412
   },
   "dxmt": {
     "version": "v0.80",

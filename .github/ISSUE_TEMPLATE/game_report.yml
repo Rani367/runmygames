@@ -1,0 +1,63 @@
+name: Game compatibility report
+description: Tell us how a game runs, good or bad. Reports help us improve compat/games.json.
+title: "[Game]: "
+labels: ["compatibility"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for testing! Reports about games that work perfectly are just as useful as reports about
+        games that don't.
+  - type: input
+    id: game
+    attributes:
+      label: Game name
+      placeholder: e.g. Cyberpunk 2077
+    validations:
+      required: true
+  - type: input
+    id: appid
+    attributes:
+      label: Steam app id
+      description: The number in the game's store URL (store.steampowered.com/app/**1091500**/...), or the first column of `rmg games`.
+      placeholder: e.g. 1091500
+    validations:
+      required: true
+  - type: dropdown
+    id: status
+    attributes:
+      label: Does it work?
+      options:
+        - Perfect
+        - Playable
+        - Runs with issues
+        - Doesn't start
+    validations:
+      required: true
+  - type: dropdown
+    id: renderer
+    attributes:
+      label: Renderer used
+      description: Shown in the game's settings in the app, or by `rmg games`.
+      options:
+        - Automatic
+        - DXMT
+        - D3DMetal
+        - WineD3D
+    validations:
+      required: true
+  - type: textarea
+    id: settings
+    attributes:
+      label: Settings or launch arguments that helped
+      description: Renderer overrides, launch arguments, environment variables, in-game settings, issues you saw...
+    validations:
+      required: false
+  - type: textarea
+    id: diagnose
+    attributes:
+      label: Output of `rmg diagnose` (optional)
+      description: Run `rmg diagnose` in Terminal, or use **Help > Copy Diagnostics** in the app. Most useful if the game doesn't start.
+      render: text
+    validations:
+      required: false

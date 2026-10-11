@@ -8,6 +8,8 @@ source "$(dirname "$0")/common.sh"
 
 DMG="${1:-}"
 if [[ -z "$DMG" ]]; then
+    # Newest matching download; names are Apple's, so ls is safe here.
+    # shellcheck disable=SC2012
     DMG="$(ls -t "$HOME"/Downloads/*[Pp]orting*[Tt]oolkit*.dmg 2>/dev/null | head -1 || true)"
 fi
 [[ -f "$DMG" ]] || die "usage: $0 path/to/Game_Porting_Toolkit.dmg (download from developer.apple.com/games)"

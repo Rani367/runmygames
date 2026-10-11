@@ -309,7 +309,7 @@ do {
         say("✓ stopped")
 
     case "wine":
-        let p = try manager().engine.run(args, wait: true)
+        let p = try manager().engine.run(args, wait: true, inheritOutput: true)
         exit(p.terminationStatus)
 
     case "update":

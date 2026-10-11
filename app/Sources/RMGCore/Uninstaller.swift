@@ -12,9 +12,7 @@ public struct Uninstaller: Sendable {
         return app.pathExtension == "app" && app.lastPathComponent.hasPrefix("RunMyGames") ? app : nil
     }
 
-    public var cliLink: URL {
-        FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".local/bin/rmg")
-    }
+    public var cliLink: URL { paths.userHome.appendingPathComponent(".local/bin/rmg") }
 
     /// What `run(all:)` would delete, for the confirmation prompt.
     public func targets(all: Bool) -> [URL] {

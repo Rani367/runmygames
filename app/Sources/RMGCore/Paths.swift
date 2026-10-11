@@ -4,12 +4,15 @@ import Foundation
 public struct Paths: Sendable {
     public let home: URL
     public let resources: URL
+    /// The user's home folder (injectable so tests never touch the real one).
+    public let userHome: URL
 
-    public init(home: URL? = nil, resources: URL? = nil) {
+    public init(home: URL? = nil, resources: URL? = nil, userHome: URL? = nil) {
         let env = ProcessInfo.processInfo.environment
+        let user = userHome ?? FileManager.default.homeDirectoryForCurrentUser
+        self.userHome = user
         self.home = home ?? env["RMG_HOME"].map { URL(fileURLWithPath: $0) }
-            ?? FileManager.default.homeDirectoryForCurrentUser
-                .appendingPathComponent("Library/Application Support/RunMyGames")
+            ?? user.appendingPathComponent("Library/Application Support/RunMyGames")
         self.resources = resources ?? Paths.locateResources()
     }
 
@@ -25,17 +28,13 @@ public struct Paths: Sendable {
     public var prefix: URL { home.appendingPathComponent("prefix") }
     public var settingsFile: URL { home.appendingPathComponent("settings.json") }
     public var gameSettingsDir: URL { home.appendingPathComponent("games") }
-    public var logs: URL {
-        FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Logs/RunMyGames")
-    }
+    public var logs: URL { userHome.appendingPathComponent("Library/Logs/RunMyGames") }
     /// Downloads and build trees; safe to delete.
     public var cache: URL {
         if let c = ProcessInfo.processInfo.environment["RMG_CACHE"] { return URL(fileURLWithPath: c) }
-        return FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Caches/RunMyGames")
+        return userHome.appendingPathComponent("Library/Caches/RunMyGames")
     }
-    public var launchers: URL {
-        FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Applications/RunMyGames")
-    }
+    public var launchers: URL { userHome.appendingPathComponent("Applications/RunMyGames") }
 
     // Inside the Windows prefix
     public var driveC: URL { prefix.appendingPathComponent("drive_c") }

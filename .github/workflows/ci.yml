@@ -1,0 +1,54 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# A newer push to the same branch or PR makes the running build pointless.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  HOMEBREW_NO_AUTO_UPDATE: 1
+  HOMEBREW_NO_INSTALL_CLEANUP: 1
+  HOMEBREW_NO_ANALYTICS: 1
+
+jobs:
+  build:
+    runs-on: macos-15 # Apple Silicon
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install tools
+        run: brew install mingw-w64 shellcheck
+
+      # swift build -warnings-as-errors, shellcheck, shim syntax check, compat/games.json validation
+      - name: Lint
+        run: make lint
+
+      - name: Test
+        run: make test
+
+      - name: Version.swift matches VERSION
+        run: |
+          make version
+          git diff --exit-code \
+            || { echo "::error::Version.swift does not match VERSION. Run 'make version' and commit the result."; exit 1; }
+
+      - name: Build release zip
+        run: make dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: RunMyGames-${{ github.sha }}
+          path: |
+            dist/*.zip
+            dist/*.sha256
+          if-no-files-found: error
+          retention-days: 14

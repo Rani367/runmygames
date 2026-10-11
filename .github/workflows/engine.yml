@@ -1,0 +1,113 @@
+name: Engine
+
+# Builds the Wine engine from CodeWeavers' CrossOver source on a GitHub runner and attaches it
+# to an `engine-<build>` release, the asset engine/manifest.json points at.
+#
+# Building takes about 60-90 minutes. While the repo is private, GitHub bills macOS minutes at
+# 10x, so prefer running this once the repo is public. Until then, build the engine on your own
+# Mac (`make engine`) and package it with `make release-engine` instead (see CONTRIBUTING.md).
+
+on:
+  workflow_dispatch:
+    inputs:
+      build:
+        description: "Engine build string, e.g. 26.3.0-1 (must match engine.build in engine/manifest.json)"
+        required: true
+        type: string
+      release_tag:
+        description: "Release to upload to (default: engine-<build>)"
+        required: false
+        type: string
+        default: ""
+
+concurrency:
+  group: engine-${{ inputs.build }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+env:
+  HOMEBREW_NO_AUTO_UPDATE: 1
+  HOMEBREW_NO_INSTALL_CLEANUP: 1
+  HOMEBREW_NO_ANALYTICS: 1
+
+jobs:
+  engine:
+    runs-on: macos-15 # Apple Silicon
+    timeout-minutes: 300
+    env:
+      ENGINE_BUILD: ${{ inputs.build }}
+      # Input defaults cannot reference other inputs, so fill in engine-<build> here.
+      RELEASE_TAG: ${{ inputs.release_tag || format('engine-{0}', inputs.build) }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check inputs
+        run: |
+          [[ "$ENGINE_BUILD" =~ ^[0-9]+\.[0-9]+\.[0-9]+-[0-9]+$ ]] \
+            || { echo "::error::build must look like 26.3.0-1 (got '$ENGINE_BUILD')"; exit 1; }
+          [[ "$RELEASE_TAG" =~ ^[A-Za-z0-9._-]+$ ]] \
+            || { echo "::error::invalid release_tag '$RELEASE_TAG'"; exit 1; }
+          MANIFEST_BUILD="$(plutil -extract engine.build raw -o - engine/manifest.json)"
+          if [[ "$MANIFEST_BUILD" != "$ENGINE_BUILD" ]]; then
+            echo "::warning::engine/manifest.json says build $MANIFEST_BUILD, building $ENGINE_BUILD. Remember to update the manifest."
+          fi
+
+      # The engine is x86_64 and its build runs tools under Rosetta.
+      - name: Ensure Rosetta 2
+        run: /usr/bin/arch -x86_64 /usr/bin/true 2>/dev/null || sudo softwareupdate --install-rosetta --agree-to-license
+
+      - name: Install build dependencies
+        run: bash engine/deps.sh
+
+      - name: Fetch DXMT
+        run: bash engine/fetch-dxmt.sh
+
+      - name: Build Wine
+        run: bash engine/build-wine.sh
+
+      - name: Package engine
+        run: bash engine/package-engine.sh # reads ENGINE_BUILD
+
+      - name: Upload to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          tarballs=(dist/rmg-engine-*"$ENGINE_BUILD".tar.xz)
+          [[ ${#tarballs[@]} -eq 1 ]] || { echo "::error::expected one dist/rmg-engine-*$ENGINE_BUILD.tar.xz, found ${#tarballs[@]}"; exit 1; }
+          TARBALL="${tarballs[0]}"
+          [[ -f "$TARBALL.sha256" ]] || { echo "::error::$TARBALL.sha256 is missing"; exit 1; }
+          SHA256="$(cut -d' ' -f1 < "$TARBALL.sha256")"
+          SIZE="$(stat -f %z "$TARBALL")"
+          NAME="$(basename "$TARBALL")"
+
+          if ! gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            cat > "$RUNNER_TEMP/engine-notes.md" <<EOF
+          Prebuilt RunMyGames Wine engine, build \`$ENGINE_BUILD\`, built from CodeWeavers' CrossOver
+          LGPL source release. This is the engine asset referenced by \`engine/manifest.json\`; the
+          app and \`rmg engine install\` download it and verify the checksum.
+
+          | File | SHA-256 | Size (bytes) |
+          |---|---|---|
+          | \`$NAME\` | \`$SHA256\` | $SIZE |
+
+          Source and patch details are in \`SOURCE.md\` inside the tarball.
+          EOF
+            gh release create "$RELEASE_TAG" --prerelease --target "$GITHUB_SHA" \
+              --title "Engine $ENGINE_BUILD" --notes-file "$RUNNER_TEMP/engine-notes.md"
+          fi
+          gh release upload "$RELEASE_TAG" "$TARBALL" "$TARBALL.sha256" --clobber
+
+          {
+            echo "### Engine $ENGINE_BUILD uploaded to \`$RELEASE_TAG\`"
+            echo
+            echo "sha256 \`$SHA256\`, $SIZE bytes. package-engine.sh rewrote \`engine/manifest.json\` on the runner;"
+            echo "commit the same values:"
+            echo
+            echo '```json'
+            cat engine/manifest.json
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
