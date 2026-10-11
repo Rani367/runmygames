@@ -133,5 +133,12 @@ jobs:
           TAG: ${{ github.ref_name }}
           VERSION: ${{ steps.version.outputs.version }}
         run: |
-          gh release create "$TAG" dist/RunMyGames-*.zip dist/RunMyGames-*.zip.sha256 \
-            --title "RunMyGames $VERSION" --notes-file notes.md --verify-tag
+          # Publishing a draft release creates its tag and lands here too: refresh its assets
+          # (built from the tagged commit) instead of failing on "release already exists".
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" dist/RunMyGames-*.zip dist/RunMyGames-*.zip.sha256 --clobber
+            gh release edit "$TAG" --title "RunMyGames $VERSION" --notes-file notes.md
+          else
+            gh release create "$TAG" dist/RunMyGames-*.zip dist/RunMyGames-*.zip.sha256 \
+              --title "RunMyGames $VERSION" --notes-file notes.md --verify-tag
+          fi
