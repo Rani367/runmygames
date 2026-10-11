@@ -27,11 +27,28 @@ public struct GlobalSettings: Codable, Equatable, Sendable {
     public var idleSeconds = 60
     /// Extra arguments for the Windows Steam client.
     public var steamArgs: [String] = []
+    /// Look for a newer RunMyGames release on GitHub (at most once a day).
+    public var checkForUpdates = true
+    public var lastUpdateCheck: Date?
 
     public init() {}
 
+    /// Missing keys keep their defaults, so settings files from older versions still load.
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        let d = GlobalSettings()
+        metalHUD = try c.decodeIfPresent(Bool.self, forKey: .metalHUD) ?? d.metalHUD
+        retinaMode = try c.decodeIfPresent(Bool.self, forKey: .retinaMode) ?? d.retinaMode
+        msync = try c.decodeIfPresent(Bool.self, forKey: .msync) ?? d.msync
+        quitSteamWhenIdle = try c.decodeIfPresent(Bool.self, forKey: .quitSteamWhenIdle) ?? d.quitSteamWhenIdle
+        idleSeconds = try c.decodeIfPresent(Int.self, forKey: .idleSeconds) ?? d.idleSeconds
+        steamArgs = try c.decodeIfPresent([String].self, forKey: .steamArgs) ?? d.steamArgs
+        checkForUpdates = try c.decodeIfPresent(Bool.self, forKey: .checkForUpdates) ?? d.checkForUpdates
+        lastUpdateCheck = try c.decodeIfPresent(Date.self, forKey: .lastUpdateCheck)
+    }
+
     public static func load(_ paths: Paths = .shared) -> GlobalSettings {
-        (try? JSONDecoder().decode(GlobalSettings.self, from: Data(contentsOf: paths.settingsFile))) ?? GlobalSettings()
+        (try? JSON.decoder.decode(GlobalSettings.self, from: Data(contentsOf: paths.settingsFile))) ?? GlobalSettings()
     }
 
     public func save(_ paths: Paths = .shared) throws {
@@ -51,15 +68,24 @@ public struct GameSettings: Codable, Equatable, Sendable {
     public var env: [String: String]?
     /// Set when an automatically chosen renderer crashed early and we switched.
     public var autoFallback: Renderer?
+    /// Renderers that already crashed on start, so automatic switching stops after one round.
+    public var triedRenderers: [Renderer]?
 
     public init() {}
+
+    /// Back to fully automatic renderer choice (also forgets crash history).
+    public mutating func resetRenderer() {
+        renderer = nil
+        autoFallback = nil
+        triedRenderers = nil
+    }
 
     static func url(_ appID: Int, _ paths: Paths) -> URL {
         paths.gameSettingsDir.appendingPathComponent("\(appID).json")
     }
 
     public static func load(_ appID: Int, _ paths: Paths = .shared) -> GameSettings {
-        (try? JSONDecoder().decode(GameSettings.self, from: Data(contentsOf: url(appID, paths)))) ?? GameSettings()
+        (try? JSON.decoder.decode(GameSettings.self, from: Data(contentsOf: url(appID, paths)))) ?? GameSettings()
     }
 
     public func save(_ appID: Int, _ paths: Paths = .shared) throws {
@@ -75,13 +101,32 @@ public struct CompatEntry: Codable, Equatable, Sendable {
     public var args: String?
     public var env: [String: String]?
     public var notes: String?
+
+    public init(name: String? = nil, renderer: Renderer? = nil, args: String? = nil,
+                env: [String: String]? = nil, notes: String? = nil) {
+        self.name = name
+        self.renderer = renderer
+        self.args = args
+        self.env = env
+        self.notes = notes
+    }
 }
 
 public enum CompatDB {
     public static func load(_ paths: Paths = .shared) -> [Int: CompatEntry] {
-        guard let data = try? Data(contentsOf: paths.compatDB),
-              let raw = try? JSONDecoder().decode([String: CompatEntry].self, from: data) else { return [:] }
-        return Dictionary(uniqueKeysWithValues: raw.compactMap { k, v in Int(k).map { ($0, v) } })
+        guard let data = try? Data(contentsOf: paths.compatDB) else { return [:] }
+        return (try? parse(data)) ?? [:]
+    }
+
+    /// Strict parse, used by CI to validate contributions to compat/games.json.
+    public static func parse(_ data: Data) throws -> [Int: CompatEntry] {
+        let raw = try JSONDecoder().decode([String: CompatEntry].self, from: data)
+        var out: [Int: CompatEntry] = [:]
+        for (k, v) in raw {
+            guard let id = Int(k), id > 0 else { throw RMGError.failed("compat: \"\(k)\" is not a Steam app id") }
+            out[id] = v
+        }
+        return out
     }
 }
 
@@ -89,6 +134,13 @@ enum JSON {
     static func encode<T: Encodable>(_ v: T) throws -> Data {
         let e = JSONEncoder()
         e.outputFormatting = [.prettyPrinted, .sortedKeys]
+        e.dateEncodingStrategy = .iso8601
         return try e.encode(v)
+    }
+
+    static var decoder: JSONDecoder {
+        let d = JSONDecoder()
+        d.dateDecodingStrategy = .iso8601
+        return d
     }
 }

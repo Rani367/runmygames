@@ -17,6 +17,11 @@
  *                *-Shipping.exe directly, exactly what the stub would do.
  * An empty value (KEY=) removes the variable.
  *
+ * The game runs in a Job object and the shim waits until every process in it has exited,
+ * so games whose launcher starts the real executable and quits still count as running
+ * (for Steam's "Playing" state and for RunMyGames closing Steam afterwards). While it
+ * waits, C:\rmg\games\<appid>.running exists.
+ *
  * On exit it writes C:\rmg\games\<appid>.last ("exit=<code> seconds=<n> renderer=<name>")
  * so RunMyGames can switch renderers automatically if a game crashes on start.
  */
@@ -26,12 +31,23 @@
 #include <wchar.h>
 
 #define MAX_CMD 32768
+#define LOG_PATH L"C:\\rmg\\logs\\shim.log"
+#define LOG_LIMIT (1024 * 1024)
 
 static WCHAR extra_args[4096], exec_override[MAX_PATH], replace_name[MAX_PATH];
 
+/* Keeps one previous generation (shim.log.1) once the log passes LOG_LIMIT. */
+static void rotate_log(void)
+{
+    WIN32_FILE_ATTRIBUTE_DATA attr;
+    if (GetFileAttributesExW(LOG_PATH, GetFileExInfoStandard, &attr) &&
+        (attr.nFileSizeHigh || attr.nFileSizeLow > LOG_LIMIT))
+        MoveFileExW(LOG_PATH, LOG_PATH L".1", MOVEFILE_REPLACE_EXISTING);
+}
+
 static void log_line(const WCHAR *fmt, const WCHAR *arg)
 {
-    FILE *f = _wfopen(L"C:\\rmg\\logs\\shim.log", L"a, ccs=UTF-8");
+    FILE *f = _wfopen(LOG_PATH, L"a, ccs=UTF-8");
     if (!f) return;
     fwprintf(f, fmt, arg);
     fputwc(L'\n', f);
@@ -135,10 +151,55 @@ static const WCHAR *apply_exec_override(const WCHAR *cmd, WCHAR *out, size_t out
     return out;
 }
 
+/* A job whose completion port reports when its last process exits, or NULL if Wine
+ * cannot provide one (the shim then only waits for the main process). */
+static HANDLE create_job(HANDLE *port)
+{
+    JOBOBJECT_ASSOCIATE_COMPLETION_PORT acp;
+    HANDLE job = CreateJobObjectW(NULL, NULL);
+
+    *port = NULL;
+    if (!job) return NULL;
+    if (!(*port = CreateIoCompletionPort(INVALID_HANDLE_VALUE, NULL, 0, 1)))
+    {
+        CloseHandle(job);
+        return NULL;
+    }
+    acp.CompletionKey = job;
+    acp.CompletionPort = *port;
+    if (!SetInformationJobObject(job, JobObjectAssociateCompletionPortInformation, &acp, sizeof(acp)))
+    {
+        CloseHandle(*port);
+        CloseHandle(job);
+        *port = NULL;
+        return NULL;
+    }
+    return job;
+}
+
+/* Waits until no process is left in the job (the game and anything it started). */
+static void wait_for_job(HANDLE job, HANDLE port)
+{
+    DWORD msg;
+    ULONG_PTR key;
+    LPOVERLAPPED ov;
+
+    while (GetQueuedCompletionStatus(port, &msg, &key, &ov, INFINITE))
+        if ((HANDLE)key == job && msg == JOB_OBJECT_MSG_ACTIVE_PROCESS_ZERO) break;
+}
+
+static void game_file(WCHAR *path, const WCHAR *appid, const WCHAR *ext)
+{
+    _snwprintf(path, MAX_PATH, L"C:\\rmg\\games\\%ls.%ls", appid, ext);
+    path[MAX_PATH - 1] = 0;
+}
+
 int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR unused, int show)
 {
     static WCHAR cmdline[MAX_CMD], swapped[MAX_CMD], cwd[MAX_PATH];
-    WCHAR appid[64] = L"", renderer[64] = L"";
+    WCHAR appid[64] = L"", renderer[64] = L"", running[MAX_PATH] = L"";
+    HANDLE job, port;
+    ULONGLONG seconds;
     ULONGLONG start;
     const WCHAR *rest = skip_argv0(GetCommandLineW());
     STARTUPINFOW si = { sizeof(si) };
@@ -152,6 +213,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR unused, int show)
         return 1;
     }
 
+    rotate_log();
     if (GetEnvironmentVariableW(L"SteamAppId", appid, ARRAYSIZE(appid)) ||
         GetEnvironmentVariableW(L"SteamGameId", appid, ARRAYSIZE(appid)))
         apply_env_file(appid);
@@ -168,30 +230,54 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR unused, int show)
     cmdline[MAX_CMD - 1] = 0;
     log_line(L"exec: %ls", cmdline);
 
-    if (!CreateProcessW(NULL, cmdline, NULL, NULL, FALSE, 0, NULL, cwd[0] ? cwd : NULL, &si, &pi))
+    job = create_job(&port);
+    /* Suspended until it is in the job, so nothing it starts can escape the wait. */
+    if (!CreateProcessW(NULL, cmdline, NULL, NULL, FALSE, CREATE_SUSPENDED, NULL, cwd[0] ? cwd : NULL, &si, &pi))
     {
         WCHAR msg[64];
         _snwprintf(msg, ARRAYSIZE(msg), L"%lu", GetLastError());
         log_line(L"CreateProcess failed: error %ls", msg);
         return 1;
     }
+    if (job && !AssignProcessToJobObject(job, pi.hProcess))
+    {
+        log_line(L"%ls", L"job object unavailable, waiting for the main process only");
+        CloseHandle(job);
+        CloseHandle(port);
+        job = NULL;
+    }
+    if (appid[0])
+    {
+        HANDLE h;
+        game_file(running, appid, L"running");
+        h = CreateFileW(running, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+        if (h != INVALID_HANDLE_VALUE) CloseHandle(h);
+    }
     start = GetTickCount64();
+    ResumeThread(pi.hThread);
     WaitForSingleObject(pi.hProcess, INFINITE);
+    /* Crash detection is about the process Steam asked for, not helpers it left behind. */
+    seconds = (GetTickCount64() - start) / 1000;
     GetExitCodeProcess(pi.hProcess, &code);
     CloseHandle(pi.hThread);
     CloseHandle(pi.hProcess);
+    if (job)
+    {
+        wait_for_job(job, port);
+        CloseHandle(job);
+        CloseHandle(port);
+    }
 
     if (appid[0])
     {
         WCHAR path[MAX_PATH];
         FILE *f;
+        DeleteFileW(running);
         GetEnvironmentVariableW(L"RMG_RENDERER", renderer, ARRAYSIZE(renderer));
-        _snwprintf(path, MAX_PATH, L"C:\\rmg\\games\\%ls.last", appid);
-        path[MAX_PATH - 1] = 0;
+        game_file(path, appid, L"last");
         if ((f = _wfopen(path, L"w")))
         {
-            fwprintf(f, L"exit=%ld seconds=%llu renderer=%ls\n", (long)(LONG)code,
-                     (GetTickCount64() - start) / 1000, renderer);
+            fwprintf(f, L"exit=%ld seconds=%llu renderer=%ls\n", (long)(LONG)code, seconds, renderer);
             fclose(f);
         }
     }

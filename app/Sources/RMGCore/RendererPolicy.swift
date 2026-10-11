@@ -15,6 +15,22 @@ public struct RendererPolicy: Sendable {
         /// Game/Binaries/Win64/Game-Win64-Shipping.exe). Its prerequisite check fails
         /// under Wine, so the shim starts mainExe directly instead.
         public var unrealStub: String?
+        /// Set when this launch switched away from a renderer that crashed on start.
+        public var switchedFrom: Renderer?
+    }
+
+    /// What a look at the game's files found. Expensive (directory walk + PE parsing),
+    /// so ScanCache keeps it until Steam updates the game.
+    public struct Scan: Codable, Equatable, Sendable {
+        public var mainExe: URL?
+        public var apis: Set<String>
+        public var unrealStub: String?
+
+        public init(mainExe: URL?, apis: Set<String>, unrealStub: String?) {
+            self.mainExe = mainExe
+            self.apis = apis
+            self.unrealStub = unrealStub
+        }
     }
 
     public let paths: Paths
@@ -35,7 +51,8 @@ public struct RendererPolicy: Sendable {
 
     static let skipExe = ["unins", "crash", "redist", "setup", "vcredist", "vc_redist", "dxsetup", "dotnet",
                           "prereq", "easyanticheat", "battleye", "ue4prereq", "cefprocess", "helper", "report",
-                          "updater", "install", "touchup", "uploader"]
+                          "updater", "install", "touchup", "uploader", "vconsole", "editor", "hammer", "crashpad",
+                          "dedicated"]
 
     /// Best guess at the game's real executable.
     public static func mainExecutable(in dir: URL) -> URL? {
@@ -64,17 +81,39 @@ public struct RendererPolicy: Sendable {
         return best?.url
     }
 
-    /// Graphics APIs a game uses: imports of its exe plus engine DLLs beside it.
+    static let graphicsDLLs = ["d3d12.dll": "d3d12", "d3d11.dll": "d3d11", "d3d10.dll": "d3d10", "d3d10_1.dll": "d3d10",
+                               "d3d9.dll": "d3d9", "d3d8.dll": "d3d8", "ddraw.dll": "ddraw", "opengl32.dll": "opengl",
+                               "vulkan-1.dll": "vulkan", "dxgi.dll": "dxgi"]
+
+    /// Renderer modules that engines load at runtime, found beside the exe (Source 2).
+    static let rendererModules = ["rendersystemdx11.dll": "d3d11", "rendersystemvulkan.dll": "vulkan",
+                                  "rendersystemdx9.dll": "d3d9"]
+
+    /// Graphics APIs a game uses: imports of its exe plus engine DLLs beside it. Engines that
+    /// load their renderer at runtime (Source 2, Godot, ...) import nothing graphical; for
+    /// those, renderer modules beside the exe and DLL names inside it are the evidence.
     public static func graphicsAPIs(exe: URL) -> Set<String> {
         var imports = PEScanner.scan(exe)?.imports ?? []
         let dir = exe.deletingLastPathComponent()
         for dll in ["UnityPlayer.dll", "GameAssembly.dll", "Engine.dll", "renderer.dll", "Render.dll"] {
             if let i = PEScanner.scan(dir.appendingPathComponent(dll))?.imports { imports.formUnion(i) }
         }
-        let interesting = ["d3d12.dll": "d3d12", "d3d11.dll": "d3d11", "d3d10.dll": "d3d10", "d3d10_1.dll": "d3d10",
-                           "d3d9.dll": "d3d9", "d3d8.dll": "d3d8", "ddraw.dll": "ddraw", "opengl32.dll": "opengl",
-                           "vulkan-1.dll": "vulkan", "dxgi.dll": "dxgi"]
-        return Set(imports.compactMap { interesting[$0] })
+        var apis = Set(imports.compactMap { graphicsDLLs[$0] })
+        for (dll, api) in rendererModules where dir.appendingPathComponent(dll).exists { apis.insert(api) }
+        if apis.isEmpty { apis = loadedByName(exe) }
+        return apis
+    }
+
+    /// Graphics DLL names embedded in the exe (what LoadLibrary would be called with).
+    static func loadedByName(_ exe: URL) -> Set<String> {
+        guard let data = try? Data(contentsOf: exe, options: .alwaysMapped) else { return [] }
+        var out = Set<String>()
+        for (dll, api) in graphicsDLLs where !out.contains(api) {
+            let variants = Set([dll, dll.uppercased(), dll.prefix(1).uppercased() + dll.dropFirst(),
+                                dll.replacingOccurrences(of: ".dll", with: "").uppercased() + ".dll"])
+            if variants.contains(where: { data.range(of: Data($0.utf8)) != nil }) { out.insert(api) }
+        }
+        return out
     }
 
     // MARK: decision
@@ -92,10 +131,16 @@ public struct RendererPolicy: Sendable {
         }?.lastPathComponent
     }
 
-    public func decide(game: Game, settings: GameSettings, compat: CompatEntry?) -> Decision {
-        let exe = Self.mainExecutable(in: game.installDir)
-        let apis = exe.map(Self.graphicsAPIs) ?? []
-        let stub = Self.unrealStub(installDir: game.installDir, mainExe: exe)
+    public static func scan(installDir: URL) -> Scan {
+        let exe = mainExecutable(in: installDir)
+        return Scan(mainExe: exe, apis: exe.map(graphicsAPIs) ?? [],
+                    unrealStub: unrealStub(installDir: installDir, mainExe: exe))
+    }
+
+    /// `scan` defaults to a fresh look at the files; callers with a ScanCache pass its result.
+    public func decide(game: Game, settings: GameSettings, compat: CompatEntry?, scan: Scan? = nil) -> Decision {
+        let scan = scan ?? Self.scan(installDir: game.installDir)
+        let exe = scan.mainExe, apis = scan.apis, stub = scan.unrealStub
         func pick(_ r: Renderer, _ why: String) -> Decision {
             Decision(renderer: available(r), reason: available(r) == r ? why : why + " (\(r.title) not installed)",
                      mainExe: exe, apis: apis, unrealStub: stub)
@@ -116,6 +161,9 @@ public struct RendererPolicy: Sendable {
         if apis.contains("d3d11") || apis.contains("d3d10") || apis.contains("dxgi") {
             return pick(.dxmt, "game uses DirectX 11")
         }
+        if apis.contains("vulkan") {
+            return pick(.dxmt, "game uses Vulkan, which runs on MoltenVK whatever is chosen here")
+        }
         if !apis.isEmpty { return pick(.wined3d, "game uses \(apis.sorted().joined(separator: ", "))") }
         return pick(.dxmt, "graphics API not detected; DXMT is the safest fast default")
     }
@@ -129,13 +177,15 @@ public struct RendererPolicy: Sendable {
         }
     }
 
-    /// Next renderer to try when the automatic choice crashes on start.
-    public func fallback(after r: Renderer) -> Renderer? {
+    /// Renderers to try, in order, when `r` crashes on start; skips ones not installed.
+    public func fallbacks(after r: Renderer) -> [Renderer] {
+        let order: [Renderer]
         switch r {
-        case .dxmt: return d3dmetalAvailable ? .d3dmetal : .wined3d
-        case .d3dmetal: return dxmtAvailable ? .dxmt : .wined3d
-        case .wined3d: return nil
+        case .dxmt: order = [.d3dmetal, .wined3d]
+        case .d3dmetal: order = [.dxmt, .wined3d]
+        case .wined3d: order = [.dxmt, .d3dmetal]
         }
+        return order.filter { available($0) == $0 }
     }
 
     // MARK: environment

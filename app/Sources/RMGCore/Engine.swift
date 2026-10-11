@@ -1,16 +1,28 @@
 import Foundation
 
-public enum RMGError: Error, CustomStringConvertible {
+public enum RMGError: Error, CustomStringConvertible, LocalizedError {
     case noEngine
     case noSteam
     case failed(String)
 
     public var description: String {
         switch self {
-        case .noEngine: return "Wine engine not installed. Run `rmg setup` (or the setup wizard in RunMyGames.app)."
-        case .noSteam: return "Windows Steam is not installed in the prefix yet. Run `rmg setup`."
+        case .noEngine:
+            return "The Wine engine is not installed. Open RunMyGames.app, or run `rmg engine install`."
+        case .noSteam: return "Windows Steam is not installed yet. Open RunMyGames.app, or run `rmg setup`."
         case let .failed(m): return m
         }
+    }
+
+    public var errorDescription: String? { description }
+
+    /// A sentence fit for a status line or alert, whatever the error type.
+    public static func message(for error: Error) -> String {
+        if let e = error as? RMGError { return e.description }
+        if let e = error as? VDF.ParseError { return e.description }
+        let ns = error as NSError
+        if ns.domain == NSURLErrorDomain { return "Network error: \(ns.localizedDescription)" }
+        return ns.localizedDescription
     }
 }
 
@@ -46,7 +58,8 @@ public struct Engine: Sendable {
     public var dxmtAvailable: Bool { paths.dxmt.appendingPathComponent("x86_64-windows/d3d11.dll").exists }
 
     /// Base environment shared by every Wine process (Steam and games).
-    public func environment(_ settings: GlobalSettings = .load()) -> [String: String] {
+    public func environment(_ settings: GlobalSettings? = nil) -> [String: String] {
+        let settings = settings ?? GlobalSettings.load(paths)
         var env = ProcessInfo.processInfo.environment
         for k in env.keys where k.hasPrefix("WINE") || k.hasPrefix("DYLD_") { env[k] = nil }
         env["WINEPREFIX"] = paths.prefix.path
@@ -79,7 +92,8 @@ public struct Engine: Sendable {
         if let cwd { p.currentDirectoryURL = cwd }
         if let log {
             try FileManager.default.createDirectory(at: log.deletingLastPathComponent(), withIntermediateDirectories: true)
-            FileManager.default.createFile(atPath: log.path, contents: nil)
+            Self.rotate(log)
+            if !log.exists { FileManager.default.createFile(atPath: log.path, contents: nil) }
             let h = try FileHandle(forWritingTo: log)
             h.seekToEndOfFile()
             p.standardOutput = h
@@ -91,6 +105,15 @@ public struct Engine: Sendable {
         try p.run()
         if wait { p.waitUntilExit() }
         return p
+    }
+
+    /// Keeps one previous generation (`name.1`) once a log passes `limit` bytes.
+    static func rotate(_ log: URL, limit: Int = 10 << 20) {
+        let fm = FileManager.default
+        guard let size = (try? fm.attributesOfItem(atPath: log.path))?[.size] as? Int, size > limit else { return }
+        let old = log.appendingPathExtension("1")
+        try? fm.removeItem(at: old)
+        try? fm.moveItem(at: log, to: old)
     }
 
     /// `wineserver -w` (wait for all processes) or `-k` (kill everything).

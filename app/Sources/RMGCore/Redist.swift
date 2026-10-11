@@ -24,7 +24,7 @@ public enum Redist {
 
     /// Installs any missing packages; skips ones already present.
     public static func installMissing(engine: Engine, force: Bool = false,
-                                      progress: @Sendable (String) -> Void = { _ in }) async throws {
+                                      progress: @escaping @Sendable (String) -> Void = { _ in }) async throws {
         let paths = engine.paths
         let dir = paths.rmgWin.appendingPathComponent("redist")
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
@@ -34,14 +34,19 @@ public enum Redist {
             progress("Downloading \(p.name)…")
             let dest = dir.appendingPathComponent(p.file)
             if !dest.exists {
-                let (tmp, resp) = try await URLSession.shared.download(from: p.url)
-                guard (resp as? HTTPURLResponse)?.statusCode == 200 else { throw RMGError.failed("download failed: \(p.url)") }
-                try FileManager.default.moveItem(at: tmp, to: dest)
+                let name = p.name
+                try await Downloader.fetch(p.url, to: dest) { f in
+                    if let f { progress("Downloading \(name)… \(Int(f * 100))%") }
+                }
             }
             progress("Installing \(p.name)…")
             // Burn's exit code does not survive Wine's process plumbing reliably; trust the registry.
             try engine.run([dest.path] + p.args, log: paths.logs.appendingPathComponent("redist.log"))
-            guard installed(p, engine) else { throw RMGError.failed("\(p.name) did not install, see redist.log") }
+            guard installed(p, engine) else {
+                // A corrupt cached installer would fail the same way forever.
+                try? FileManager.default.removeItem(at: dest)
+                throw RMGError.failed("\(p.name) did not install. Details: ~/Library/Logs/RunMyGames/redist.log")
+            }
         }
     }
 

@@ -13,24 +13,12 @@ public struct Steam: Sendable {
 
     /// True while any steam.exe process of our prefix is alive.
     public var isRunning: Bool {
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: "/usr/bin/pgrep")
-        p.arguments = ["-f", #"[Ss]team\.exe"#]
-        p.standardOutput = FileHandle.nullDevice
-        try? p.run()
-        p.waitUntilExit()
-        return p.terminationStatus == 0 && wineserverAlive
+        Shell.run("/usr/bin/pgrep", ["-f", #"[Ss]team\.exe"#]) == 0 && wineserverAlive
     }
 
+    /// Wine starts it as ".../lib/wine/../../bin/wineserver", so match the engine root, not the exact path.
     var wineserverAlive: Bool {
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: "/usr/bin/pgrep")
-        // Wine starts it as ".../lib/wine/../../bin/wineserver", so match the engine root, not the exact path.
-        p.arguments = ["-f", NSRegularExpression.escapedPattern(for: engine.root.path) + ".*wineserver"]
-        p.standardOutput = FileHandle.nullDevice
-        try? p.run()
-        p.waitUntilExit()
-        return p.terminationStatus == 0
+        Shell.run("/usr/bin/pgrep", ["-f", NSRegularExpression.escapedPattern(for: engine.root.path) + ".*wineserver"]) == 0
     }
 
     public var log: URL { paths.logs.appendingPathComponent("steam.log") }
@@ -61,13 +49,12 @@ public struct Steam: Sendable {
     /// "repairing" the webhelper wrapper; it must not be used before the first client download.
     public var defaultArgs: [String] { clientInstalled ? ["-noverifyfiles"] : [] }
 
-    public func install(progress: (String) -> Void = { _ in }) async throws {
+    public func install(progress: @escaping @Sendable (String) -> Void = { _ in }) async throws {
         let setup = paths.driveC.appendingPathComponent("rmg/SteamSetup.exe")
-        try FileManager.default.createDirectory(at: setup.deletingLastPathComponent(), withIntermediateDirectories: true)
-        progress("Downloading Steam installer…")
-        let (tmp, _) = try await URLSession.shared.download(from: Self.installerURL)
-        try? FileManager.default.removeItem(at: setup)
-        try FileManager.default.moveItem(at: tmp, to: setup)
+        progress("Downloading the Steam installer…")
+        try await Downloader.fetch(Self.installerURL, to: setup) { f in
+            if let f { progress("Downloading the Steam installer… \(Int(f * 100))%") }
+        }
         progress("Installing Steam…")
         try engine.run([setup.path, "/S"], log: paths.logs.appendingPathComponent("steam-install.log"))
         engine.wineserver("-w")

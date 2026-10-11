@@ -28,6 +28,11 @@ public struct Paths: Sendable {
     public var logs: URL {
         FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Logs/RunMyGames")
     }
+    /// Downloads and build trees; safe to delete.
+    public var cache: URL {
+        if let c = ProcessInfo.processInfo.environment["RMG_CACHE"] { return URL(fileURLWithPath: c) }
+        return FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Caches/RunMyGames")
+    }
     public var launchers: URL {
         FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Applications/RunMyGames")
     }
@@ -58,6 +63,10 @@ public struct Paths: Sendable {
         return installed.exists ? installed : resources.appendingPathComponent("build/rmgshim.exe") // dev checkout
     }
     public var engineScripts: URL { resources.appendingPathComponent("engine") }
+    public var engineManifest: URL {
+        ProcessInfo.processInfo.environment["RMG_ENGINE_MANIFEST"].map { URL(fileURLWithPath: $0) }
+            ?? engineScripts.appendingPathComponent("manifest.json")
+    }
     public var bundledWebhelper: URL {
         let installed = resources.appendingPathComponent("steamwebhelper.exe")
         return installed.exists ? installed : resources.appendingPathComponent("build/steamwebhelper.exe") // dev checkout

@@ -1,52 +1,159 @@
+import AppKit
 import Foundation
 import RMGCore
 
 let usage = """
-rmg — RunMyGames: run Windows Steam games on macOS
+rmg \(Version.current) — RunMyGames: run Windows Steam games on macOS
 
-USAGE
-  rmg setup                    Create the Windows prefix and install Steam
+GETTING STARTED
+  rmg setup                    Download the engine, create the Windows environment, install Steam
   rmg steam                    Open the Steam window (log in, install games)
-  rmg games                    List installed games and their renderer
-  rmg launch <appid> [--watch] Launch a game (--watch: close Steam when you quit)
-  rmg sync                     Re-apply settings to all games (Steam must be closed)
-  rmg launchers                Create Launchpad/Dock apps for all installed games
-  rmg set <appid> key=value…   renderer=auto|dxmt|d3dmetal|wined3d  hud=on|off|default
-                               metalfx=on|off  retina=on|off|default  args="…"  env.NAME=value
-  rmg config key=value…        hud=on|off  retina=on|off  msync=on|off  quit-steam=on|off
-  rmg doctor                   Check that everything is installed correctly
-  rmg redist [--force]         Install the Visual C++ runtimes games need
+  rmg launchers                Add every installed game to Launchpad (~/Applications/RunMyGames)
+
+PLAYING
+  rmg games                    List installed games and the graphics layer each one uses
+  rmg launch <appid> [--watch] Play a game (--watch: close Steam again when you quit)
   rmg kill                     Force-quit Steam and all games
-  rmg wine <args…>             Run a program in the prefix (e.g. rmg wine winecfg)
-  rmg uninstall-shim           Remove RunMyGames launch options from Steam
+
+SETTINGS
+  rmg set <appid> [key=value…] Show or change a game's settings:
+                                 renderer=auto|dxmt|d3dmetal|wined3d   hud=on|off|default
+                                 metalfx=on|off|default   retina=on|off|default
+                                 args="-skipintro"   env.NAME=value (empty value removes it)
+  rmg config [key=value…]      Show or change global settings:
+                                 hud, retina, msync, quit-steam, updates (on|off), idle=<seconds>
+  rmg sync                     Re-apply settings to all games (Steam must be closed)
+
+MAINTENANCE
+  rmg doctor                   Check that everything is installed correctly
+  rmg diagnose                 Print a report to attach to bug reports
+  rmg engine [status|install|build]
+                               Engine status, download it (install [--from <tarball>] [--force]),
+                               or build it from source (needs Homebrew and Xcode, ~45 min)
+  rmg d3dmetal <gptk.dmg>      Import Apple's D3DMetal (DirectX 12) from the Game Porting Toolkit
+  rmg redist [--force]         Install the Visual C++ runtimes games need
+  rmg update                   Update RunMyGames to the latest release
+  rmg wine <args…>             Run a program in the Windows environment (e.g. rmg wine winecfg)
+  rmg uninstall [--all] [--yes]
+                               Remove the app, CLI and launchers (--all: also Steam, games, engine)
+  rmg --version
 """
 
+var guiMode = false
+
+/// Launchers run `rmg` without a terminal, so in --gui mode messages also go to a log and
+/// errors to a dialog instead of a stderr nobody sees.
+let launchLog = Paths.shared.logs.appendingPathComponent("launch.log")
+
+func logLaunch(_ s: String) {
+    guard guiMode else { return }
+    try? FileManager.default.createDirectory(at: launchLog.deletingLastPathComponent(), withIntermediateDirectories: true)
+    let line = "\(ISO8601DateFormatter().string(from: Date())) \(s)\n"
+    if let h = try? FileHandle(forWritingTo: launchLog) {
+        h.seekToEndOfFile()
+        h.write(Data(line.utf8))
+        try? h.close()
+    } else {
+        try? line.write(to: launchLog, atomically: true, encoding: .utf8)
+    }
+}
+
 func fail(_ msg: String) -> Never {
-    FileHandle.standardError.write(("error: " + msg + "\n").data(using: .utf8)!)
+    FileHandle.standardError.write(Data(("error: " + msg + "\n").utf8))
+    if guiMode {
+        logLaunch("error: \(msg)")
+        let app = NSApplication.shared
+        app.setActivationPolicy(.accessory)
+        app.activate(ignoringOtherApps: true)
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "The game could not be started"
+        alert.informativeText = msg
+        alert.addButton(withTitle: "OK")
+        alert.addButton(withTitle: "Open RunMyGames")
+        if alert.runModal() == .alertSecondButtonReturn {
+            NSWorkspace.shared.open(URL(fileURLWithPath: "/Applications/RunMyGames.app"))
+        }
+    }
     exit(1)
 }
 
-func say(_ s: String) { print(s); fflush(stdout) }
-
-func manager() -> Manager {
-    do { return try Manager() } catch { fail("\(error)") }
+func say(_ s: String) {
+    print(s)
+    fflush(stdout)
+    logLaunch(s)
 }
 
-func flag(_ v: String) -> Bool? {
-    switch v.lowercased() {
-    case "on", "yes", "true", "1": return true
-    case "off", "no", "false", "0": return false
-    default: return nil
-    }
+func manager() -> Manager {
+    do { return try Manager() } catch { fail(RMGError.message(for: error)) }
 }
 
 /// Runs async work from the synchronous CLI.
 func blocking(_ body: @escaping @Sendable () async throws -> Void) {
     let sem = DispatchSemaphore(value: 0)
     nonisolated(unsafe) var err: Error?
-    Task { do { try await body() } catch { err = error }; sem.signal() }
+    Task {
+        do { try await body() } catch { err = error }
+        sem.signal()
+    }
     sem.wait()
-    if let err { fail("\(err)") }
+    if let err { fail(RMGError.message(for: err)) }
+}
+
+/// A one-line progress bar that redraws in place on a terminal.
+final class ProgressLine: @unchecked Sendable {
+    private let lock = NSLock()
+    private var label = ""
+    private let tty = isatty(STDOUT_FILENO) != 0
+
+    func update(_ step: EngineInstaller.Step) {
+        lock.withLock {
+            switch step {
+            case let .downloading(name, f):
+                let text = "Downloading \(name)… " + (f.map { "\(Int($0 * 100))%" } ?? "")
+                if tty { print("\r\u{1B}[K" + text, terminator: "") } else if label != name { print(text) }
+                label = name
+            case let .installing(name):
+                if tty { print("\r\u{1B}[K", terminator: "") }
+                print("Installing \(name)…")
+                label = ""
+            }
+            fflush(stdout)
+        }
+    }
+}
+
+func installEngine(from local: URL? = nil, force: Bool = false) {
+    let installer: EngineInstaller
+    do { installer = try EngineInstaller() } catch { fail(RMGError.message(for: error)) }
+    if let m = try? Manager(), m.steam.isRunning || m.gameRunning {
+        fail("Quit Steam and your games first (or `rmg kill`): the engine is in use.")
+    }
+    let bar = ProgressLine()
+    blocking { try await installer.install(localEngine: local, force: force, progress: { bar.update($0) }) }
+    if let m = try? Manager() { try? m.prefix.installRendererPlaceholders() }
+    say("✓ Engine ready.")
+}
+
+func runScript(_ name: String, _ args: [String] = []) -> Int32 {
+    let script = Paths.shared.engineScripts.appendingPathComponent(name)
+    guard script.exists else { fail("\(name) is missing from \(Paths.shared.engineScripts.path)") }
+    let p = Process()
+    p.executableURL = URL(fileURLWithPath: "/bin/bash")
+    p.arguments = [script.path] + args
+    do { try p.run() } catch { fail(RMGError.message(for: error)) }
+    p.waitUntilExit()
+    return p.terminationStatus
+}
+
+func confirm(_ question: String) -> Bool {
+    print(question + " [y/N] ", terminator: "")
+    fflush(stdout)
+    return ["y", "yes"].contains(readLine()?.lowercased().trimmingCharacters(in: .whitespaces) ?? "")
+}
+
+extension URL {
+    var exists: Bool { FileManager.default.fileExists(atPath: path) }
 }
 
 var args = Array(CommandLine.arguments.dropFirst())
@@ -56,10 +163,14 @@ args.removeFirst()
 do {
     switch cmd {
     case "setup":
+        if !Doctor.rosettaInstalled {
+            fail("Rosetta 2 is required. Install it with: softwareupdate --install-rosetta --agree-to-license")
+        }
+        if (try? EngineInstaller())?.upToDate != true || (try? Engine()) == nil { installEngine() }
         let m = manager()
         try m.prefix.create(progress: say)
-        blocking { try await Redist.installMissing(engine: m.engine, progress: say) }
-        if !m.steam.installed { blocking { try await m.steam.install(progress: say) } }
+        blocking { try await Redist.installMissing(engine: m.engine, progress: { say($0) }) }
+        if !m.steam.installed { blocking { try await m.steam.install(progress: { say($0) }) } }
         say("✓ Ready. Next: `rmg steam` to log in and install games.")
 
     case "steam":
@@ -69,17 +180,24 @@ do {
     case "games":
         let m = manager()
         let shimmed = m.shimmedAppIDs()
+        let compat = CompatDB.load()
         let games = m.library.games()
         if games.isEmpty { say("No games installed yet. Use `rmg steam` to install some.") }
         for g in games {
-            let d = m.policy.decide(game: g, settings: GameSettings.load(g.id), compat: CompatDB.load()[g.id])
-            let state = g.installed ? (shimmed.contains(g.id) ? "" : "  (run `rmg sync` with Steam closed)") : "  [downloading]"
+            guard g.installed else {
+                say(String(format: "%8d  %-40@ [downloading]", g.id, g.name as NSString))
+                continue
+            }
+            let d = m.decision(for: g, compat: compat[g.id])
+            let state = shimmed.contains(g.id) ? "" : "  (run `rmg sync` with Steam closed)"
             say(String(format: "%8d  %-40@ %-9@ %@%@", g.id, g.name as NSString, d.renderer.title as NSString,
                        d.reason as NSString, state as NSString))
         }
 
     case "launch":
-        guard let id = args.first.flatMap(Int.init) else { fail("usage: rmg launch <appid>") }
+        guiMode = args.contains("--gui")
+        guard let id = args.first.flatMap(Int.init) else { fail("usage: rmg launch <appid> [--watch]") }
+        if guiMode { logLaunch("launch \(id)") }
         let m = manager()
         try m.launch(appID: id, progress: say)
         if args.contains("--watch") { m.watch() }
@@ -93,70 +211,97 @@ do {
     case "launchers":
         let m = manager()
         let factory = LauncherFactory(paths: m.paths)
-        for g in m.library.games().filter(\.installed) {
+        let installed = m.library.games().filter(\.installed)
+        for g in installed {
             blocking {
                 let url = try await factory.create(for: g, artwork: m.library.artwork(g.id))
-                say("✓ \(url.path)")
+                say("✓ \(url.path.abbreviatingHome)")
             }
         }
+        for name in factory.prune(keeping: Set(installed.map(\.id))) { say("– removed \(name) (no longer installed)") }
+        if installed.isEmpty { say("No installed games yet.") }
 
     case "set":
-        guard let id = args.first.flatMap(Int.init) else { fail("usage: rmg set <appid> key=value…") }
+        guard let id = args.first.flatMap(Int.init) else { fail("usage: rmg set <appid> [key=value…]") }
         var s = GameSettings.load(id)
-        for kv in args.dropFirst() {
-            let parts = kv.split(separator: "=", maxSplits: 1).map(String.init)
-            guard parts.count == 2 else { fail("expected key=value, got \(kv)") }
-            let (k, v) = (parts[0].lowercased(), parts[1])
-            switch k {
-            case "renderer":
-                if v == "auto" { s.renderer = nil; s.autoFallback = nil }
-                else if let r = Renderer(rawValue: v.lowercased()) { s.renderer = r }
-                else { fail("renderer must be auto, dxmt, d3dmetal or wined3d") }
-            case "hud": s.metalHUD = flag(v)
-            case "metalfx": s.metalFX = flag(v)
-            case "retina": s.retinaMode = flag(v)
-            case "args": s.args = v.isEmpty ? nil : v
-            default:
-                if parts[0].hasPrefix("env.") {
-                    var env = s.env ?? [:]
-                    env[String(parts[0].dropFirst(4))] = v.isEmpty ? nil : v
-                    s.env = env.isEmpty ? nil : env
-                } else { fail("unknown setting \(k)") }
-            }
-        }
-        try s.save(id)
+        let changes = Array(args.dropFirst())
+        for kv in changes { try CLIParsing.applyGameSetting(kv, to: &s) }
+        if !changes.isEmpty { try s.save(id) }
         let m = manager()
         if let g = m.library.game(id) {
-            let d = try m.prepare(g)
-            say("✓ \(g.name): \(d.renderer.title) (\(d.reason))")
-        } else { say("✓ saved") }
+            if changes.isEmpty {
+                say("\(g.name) (\(g.id))")
+                for l in CLIParsing.describe(s) { say("  " + l) }
+                let d = m.decision(for: g, settings: s)
+                say("  → \(d.renderer.title): \(d.reason)")
+            } else {
+                let d = try m.prepare(g)
+                say("✓ \(g.name): \(d.renderer.title) (\(d.reason))")
+            }
+        } else {
+            if changes.isEmpty { for l in CLIParsing.describe(s) { say(l) } } else { say("✓ saved") }
+        }
 
     case "config":
         var g = GlobalSettings.load()
-        for kv in args {
-            let p = kv.split(separator: "=", maxSplits: 1).map(String.init)
-            guard p.count == 2, let b = flag(p[1]) else { fail("expected key=on|off, got \(kv)") }
-            switch p[0] {
-            case "hud": g.metalHUD = b
-            case "retina": g.retinaMode = b
-            case "msync": g.msync = b
-            case "quit-steam": g.quitSteamWhenIdle = b
-            default: fail("unknown setting \(p[0])")
-            }
+        guard !args.isEmpty else {
+            for l in CLIParsing.describe(g) { say(l) }
+            exit(0)
         }
+        let before = g
+        for kv in args { try CLIParsing.applyGlobalSetting(kv, to: &g) }
         try g.save()
-        if let m = try? Manager(), m.prefix.exists, args.contains(where: { $0.hasPrefix("retina=") }) {
-            try m.engine.importRegistry(Prefix.defaultsRegistry(retina: g.retinaMode))
+        if let m = try? Manager(), m.prefix.exists {
+            if g.retinaMode != before.retinaMode {
+                try m.engine.importRegistry(Prefix.defaultsRegistry(retina: g.retinaMode))
+            }
+            if g.metalHUD != before.metalHUD {
+                let compat = CompatDB.load()
+                for game in m.library.games().filter(\.installed) { _ = try? m.prepare(game, global: g, compatDB: compat) }
+            }
         }
         say("✓ saved")
 
     case "doctor":
         Doctor.run(say)
+        if let i = try? EngineInstaller(), (try? Engine()) != nil, !i.upToDate {
+            say("  An engine update is available: `rmg engine install`")
+        }
+
+    case "diagnose":
+        print(Diagnostics.report(), terminator: "")
+
+    case "engine":
+        switch args.first ?? "status" {
+        case "status":
+            let installer = try EngineInstaller()
+            if let e = try? Engine() { say("Engine: \(Doctor.engineDescription(e)) at \(e.root.path.abbreviatingHome)") }
+            else { say("Engine: not installed") }
+            say("DXMT: \(installer.installedDXMT ?? "not installed")")
+            say("Latest: engine build \(installer.manifest.engine.build), DXMT \(installer.manifest.dxmt.version)")
+            say(installer.upToDate ? "✓ Up to date." : "Run `rmg engine install` to update.")
+        case "install", "update":
+            var local: URL?
+            if let i = args.firstIndex(of: "--from") {
+                guard i + 1 < args.count else { fail("usage: rmg engine install --from <engine.tar.xz>") }
+                local = URL(fileURLWithPath: args[i + 1])
+            }
+            installEngine(from: local, force: args.contains("--force"))
+        case "build":
+            for c in Doctor.buildChecks() where !c.ok { fail("\(c.name) is required to build from source: \(c.detail)") }
+            say("Building the engine from source. This takes about 45 minutes the first time.")
+            exit(runScript("install-engine.sh"))
+        default:
+            fail("usage: rmg engine [status|install|build]")
+        }
+
+    case "d3dmetal":
+        exit(runScript("import-d3dmetal.sh", args.prefix(1).map { $0 }))
 
     case "redist":
         let m = manager()
         let force = args.contains("--force")
-        blocking { try await Redist.installMissing(engine: m.engine, force: force, progress: say) }
+        blocking { try await Redist.installMissing(engine: m.engine, force: force, progress: { say($0) }) }
         say("✓ runtimes installed")
 
     case "kill":
@@ -166,6 +311,25 @@ do {
     case "wine":
         let p = try manager().engine.run(args, wait: true)
         exit(p.terminationStatus)
+
+    case "update":
+        say("Updating with: \(Project.installCommand)")
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/bin/bash")
+        p.arguments = ["-c", Project.installCommand]
+        try p.run()
+        p.waitUntilExit()
+        exit(p.terminationStatus)
+
+    case "uninstall":
+        let all = args.contains("--all")
+        let u = Uninstaller()
+        let targets = u.targets(all: all)
+        say("This removes:")
+        for t in targets { say("  " + t.path.abbreviatingHome) }
+        if all { say("including the Windows environment, Steam and every installed game.") }
+        guard args.contains("--yes") || confirm("Continue?") else { say("Cancelled."); exit(1) }
+        u.run(all: all, say: say)
 
     case "uninstall-shim":
         let m = manager()
@@ -178,12 +342,20 @@ do {
         guard let png = AppIcon.png(), let icns = IconMaker.icns(from: png) else { fail("icon rendering failed") }
         try icns.write(to: URL(fileURLWithPath: out))
 
+    case "_validate-compat": // CI helper
+        let file = URL(fileURLWithPath: args.first ?? "compat/games.json")
+        let db = try CompatDB.parse(Data(contentsOf: file))
+        say("✓ \(db.count) entries")
+
+    case "--version", "-v", "version":
+        say(Version.current)
+
     case "help", "-h", "--help":
         say(usage)
 
     default:
-        fail("unknown command \(cmd)\n\n\(usage)")
+        fail("unknown command \"\(cmd)\". Run `rmg help` for the list of commands.")
     }
 } catch {
-    fail("\(error)")
+    fail(RMGError.message(for: error))
 }

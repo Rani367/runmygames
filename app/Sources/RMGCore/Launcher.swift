@@ -7,11 +7,33 @@ public struct LauncherFactory: Sendable {
     public let paths: Paths
     public init(paths: Paths = .shared) { self.paths = paths }
 
-    /// The `rmg` binary the launcher calls: inside the installed app, or the current one.
+    /// The `rmg` binary the launcher calls: the one next to the running executable (the
+    /// app and the CLI both live in RunMyGames.app/Contents/MacOS), else the standard install.
     public var rmgBinary: String {
-        let installed = "/Applications/RunMyGames.app/Contents/MacOS/rmg"
-        if FileManager.default.isExecutableFile(atPath: installed) { return installed }
-        return URL(fileURLWithPath: CommandLine.arguments[0]).resolvingSymlinksInPath().path
+        let fm = FileManager.default
+        if let exe = Bundle.main.executableURL?.resolvingSymlinksInPath() {
+            let sibling = exe.deletingLastPathComponent().appendingPathComponent("rmg").path
+            if fm.isExecutableFile(atPath: sibling) { return sibling }
+        }
+        return "/Applications/RunMyGames.app/Contents/MacOS/rmg"
+    }
+
+    /// The launcher's shell script. Falls back to the usual install locations if the app moved.
+    public func script(for game: Game) -> String {
+        let name = game.name.components(separatedBy: .newlines).joined(separator: " ")
+        // Goes inside single- and double-quoted AppleScript below: drop the quote characters.
+        let plainName = String(name.filter { !"'\"\\".contains($0) })
+        return """
+        #!/bin/sh
+        # RunMyGames launcher for \(name) (Steam app \(game.id))
+        RMG=\(Shell.quote(rmgBinary))
+        for c in "$RMG" /Applications/RunMyGames.app/Contents/MacOS/rmg "$HOME/Applications/RunMyGames.app/Contents/MacOS/rmg"; do
+            if [ -x "$c" ]; then exec "$c" launch \(game.id) --watch --gui; fi
+        done
+        osascript -e 'display alert "RunMyGames is not installed" message "Install RunMyGames again to play \(plainName)."'
+        exit 1
+
+        """
     }
 
     public func appURL(for game: Game) -> URL {
@@ -37,13 +59,7 @@ public struct LauncherFactory: Sendable {
         try fm.createDirectory(at: contents.appendingPathComponent("MacOS"), withIntermediateDirectories: true)
         try fm.createDirectory(at: contents.appendingPathComponent("Resources"), withIntermediateDirectories: true)
 
-        let script = """
-        #!/bin/sh
-        # RunMyGames launcher for \(game.name.replacingOccurrences(of: "\n", with: " ")) (Steam app \(game.id))
-        RMG="\(rmgBinary)"
-        [ -x "$RMG" ] || RMG="/Applications/RunMyGames.app/Contents/MacOS/rmg"
-        exec "$RMG" launch \(game.id) --watch
-        """
+        let script = script(for: game)
         let exe = contents.appendingPathComponent("MacOS/launch")
         try script.write(to: exe, atomically: true, encoding: .utf8)
         try fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: exe.path)
@@ -65,7 +81,7 @@ public struct LauncherFactory: Sendable {
         // Portrait capsule (cached or from Steam's CDN) makes the best square icon; the
         // wide header is the last resort.
         var art = SteamLibrary(paths: paths).artwork(game.id, portraitOnly: true)
-        if art == nil { art = try? await download(SteamLibrary.artworkCDN(game.id)) }
+        for url in SteamLibrary.artworkCDN(game.id) where art == nil { art = try? await download(url) }
         if art == nil { art = artwork }
         if let art, let icon = IconMaker.icns(from: art) {
             try icon.write(to: contents.appendingPathComponent("Resources/AppIcon.icns"))
@@ -75,7 +91,8 @@ public struct LauncherFactory: Sendable {
         cs.executableURL = URL(fileURLWithPath: "/usr/bin/codesign")
         cs.arguments = ["-f", "-s", "-", app.path]
         cs.standardError = FileHandle.nullDevice
-        try? cs.run(); cs.waitUntilExit()
+        try? cs.run()
+        cs.waitUntilExit()
         // Refresh Finder/Launchpad icon cache.
         NSWorkspace.shared.noteFileSystemChanged(app.path)
         return app
@@ -85,10 +102,23 @@ public struct LauncherFactory: Sendable {
         if let u = existing(id) { try? FileManager.default.removeItem(at: u) }
     }
 
+    /// Removes launchers of games that are no longer installed. Returns their names.
+    @discardableResult
+    public func prune(keeping ids: Set<Int>) -> [String] {
+        let fm = FileManager.default
+        var removed: [String] = []
+        for app in (try? fm.contentsOfDirectory(at: paths.launchers, includingPropertiesForKeys: nil)) ?? [] {
+            guard let id = NSDictionary(contentsOf: app.appendingPathComponent("Contents/Info.plist"))?["RMGAppID"] as? Int,
+                  !ids.contains(id) else { continue }
+            if (try? fm.removeItem(at: app)) != nil { removed.append(app.deletingPathExtension().lastPathComponent) }
+        }
+        return removed
+    }
+
     private func download(_ url: URL) async throws -> URL {
-        let (tmp, resp) = try await URLSession.shared.download(from: url)
-        guard (resp as? HTTPURLResponse)?.statusCode == 200 else { throw RMGError.failed("no artwork") }
-        return tmp
+        let dest = FileManager.default.temporaryDirectory.appendingPathComponent("rmg-art-\(UUID().uuidString).jpg")
+        try await Downloader.fetch(url, to: dest)
+        return dest
     }
 }
 
@@ -111,7 +141,8 @@ public enum IconMaker {
         let p = Process()
         p.executableURL = URL(fileURLWithPath: "/usr/bin/iconutil")
         p.arguments = ["-c", "icns", set.path, "-o", out.path]
-        try? p.run(); p.waitUntilExit()
+        try? p.run()
+        p.waitUntilExit()
         defer { try? fm.removeItem(at: out) }
         return try? Data(contentsOf: out)
     }

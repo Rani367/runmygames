@@ -37,10 +37,34 @@ public struct Prefix: Sendable {
             try engine.run(["wineboot", "-i"], env: ["WINEDLLOVERRIDES": "mscoree,mshtml="],
                            log: paths.logs.appendingPathComponent("prefix.log"))
             engine.wineserver("-w")
+            try recordEngine()
+        } else {
+            try upgradeIfNeeded(progress: progress)
         }
         progress("Applying macOS integration settings…")
         try engine.importRegistry(Self.defaultsRegistry(retina: GlobalSettings.load(paths).retinaMode))
         try installShim()
+    }
+
+    private var engineMarker: URL { paths.prefix.appendingPathComponent(".rmg-engine") }
+
+    private func recordEngine() throws {
+        try engine.version.write(to: engineMarker, atomically: true, encoding: .utf8)
+    }
+
+    /// After an engine update, lets the new Wine bring the prefix's builtin files and registry
+    /// up to date (`wineboot -u`), as Wine itself expects. Cheap no-op otherwise.
+    public func upgradeIfNeeded(progress: (String) -> Void = { _ in }) throws {
+        guard exists else { return }
+        let recorded = (try? String(contentsOf: engineMarker, encoding: .utf8))?.trimmingCharacters(in: .whitespacesAndNewlines)
+        // Prefixes from before this marker existed were made by the current engine.
+        guard let recorded else { try recordEngine(); return }
+        guard recorded != engine.version else { return }
+        progress("Updating the Windows environment for engine \(engine.version)…")
+        try engine.run(["wineboot", "-u"], env: ["WINEDLLOVERRIDES": "mscoree,mshtml="],
+                       log: paths.logs.appendingPathComponent("prefix.log"))
+        engine.wineserver("-w")
+        try recordEngine()
     }
 
     public func installShim() throws {
@@ -71,10 +95,22 @@ public struct Prefix: Sendable {
         try fm.copyItem(at: src, to: dst)
     }
 
-    /// Per-executable Retina override (winemac reads AppDefaults\<exe>\Mac Driver).
-    public func setRetina(_ on: Bool?, exeName: String) throws {
-        let key = "HKEY_CURRENT_USER\\Software\\Wine\\AppDefaults\\\(exeName)\\Mac Driver"
-        let value = on.map { "\"\($0 ? "y" : "n")\"" } ?? "-"
-        try engine.importRegistry("Windows Registry Editor Version 5.00\n\n[\(key)]\n\"RetinaMode\"=\(value)\n")
+    /// Per-executable Retina overrides (winemac reads AppDefaults\<exe>\Mac Driver), in one regedit run.
+    public func applyRetina(_ ops: [Manager.RetinaOp]) throws {
+        guard !ops.isEmpty else { return }
+        try engine.importRegistry(Self.retinaRegistry(ops))
+    }
+
+    static func retinaRegistry(_ ops: [Manager.RetinaOp]) -> String {
+        var out = "Windows Registry Editor Version 5.00\n"
+        for op in ops {
+            let (exe, value): (String, String)
+            switch op {
+            case let .set(e, on): (exe, value) = (e, on ? "\"y\"" : "\"n\"")
+            case let .remove(e): (exe, value) = (e, "-")
+            }
+            out += "\n[HKEY_CURRENT_USER\\Software\\Wine\\AppDefaults\\\(exe)\\Mac Driver]\n\"RetinaMode\"=\(value)\n"
+        }
+        return out
     }
 }

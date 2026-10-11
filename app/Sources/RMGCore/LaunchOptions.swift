@@ -34,8 +34,8 @@ public enum LaunchOptions {
         var changed = 0
         for user in users where Int(user) != nil && user != "0" {
             let url = userdata.appendingPathComponent("\(user)/config/localconfig.vdf")
-            guard let text = try? String(contentsOf: url, encoding: .utf8) else { continue }
-            var vdf = try VDF.parse(text)
+            // An unreadable file for one account must not block the others.
+            guard let text = try? String(contentsOf: url, encoding: .utf8), var vdf = try? VDF.parse(text) else { continue }
             if try apply(to: &vdf, appIDs: appIDs, remove: remove) {
                 try? FileManager.default.removeItem(at: url.appendingPathExtension("rmg-backup"))
                 try FileManager.default.copyItem(at: url, to: url.appendingPathExtension("rmg-backup"))

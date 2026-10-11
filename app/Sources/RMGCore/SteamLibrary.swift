@@ -6,6 +6,20 @@ public struct Game: Identifiable, Hashable, Sendable {
     public let installDir: URL
     public let installed: Bool  // fully downloaded (StateFlags has bit 4)
     public let sizeOnDisk: Int64
+    /// Steam's build id and update time; they change whenever the game's files do.
+    public let buildID: String
+    public let lastUpdated: String
+
+    public init(id: Int, name: String, installDir: URL, installed: Bool, sizeOnDisk: Int64,
+                buildID: String = "", lastUpdated: String = "") {
+        self.id = id
+        self.name = name
+        self.installDir = installDir
+        self.installed = installed
+        self.sizeOnDisk = sizeOnDisk
+        self.buildID = buildID
+        self.lastUpdated = lastUpdated
+    }
 }
 
 /// Reads the Windows Steam client's libraries inside the prefix.
@@ -45,13 +59,30 @@ public struct SteamLibrary: Sendable {
                 out[id] = Game(id: id, name: st["name"]?.string ?? "App \(id)",
                                installDir: lib.appendingPathComponent("common").appendingPathComponent(dir),
                                installed: flags & 4 != 0,
-                               sizeOnDisk: st["SizeOnDisk"]?.string.flatMap(Int64.init) ?? 0)
+                               sizeOnDisk: st["SizeOnDisk"]?.string.flatMap(Int64.init) ?? 0,
+                               buildID: st["buildid"]?.string ?? "",
+                               lastUpdated: st["LastUpdated"]?.string ?? "")
             }
         }
         return out.values.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
     }
 
     public func game(_ id: Int) -> Game? { games().first { $0.id == id } }
+
+    /// Latest modification time across the steamapps folders. Steam rewrites an
+    /// appmanifest whenever a download starts, progresses or finishes, which changes it.
+    public func changeStamp() -> Date {
+        let fm = FileManager.default
+        var latest = Date.distantPast
+        for lib in libraryFolders() {
+            for f in (try? fm.contentsOfDirectory(atPath: lib.path)) ?? [] where f.hasPrefix("appmanifest_") {
+                if let d = (try? fm.attributesOfItem(atPath: lib.appendingPathComponent(f).path))?[.modificationDate] as? Date,
+                   d > latest { latest = d }
+            }
+            if let d = (try? fm.attributesOfItem(atPath: lib.path))?[.modificationDate] as? Date, d > latest { latest = d }
+        }
+        return latest
+    }
 
     /// Maps "C:\\Program Files (x86)\\Steam" or "Z:\\Users\\..." to a Unix URL.
     public func unixPath(_ windows: String) -> URL? {
@@ -68,7 +99,7 @@ public struct SteamLibrary: Sendable {
     /// flat (`<id>_library_600x900.jpg`) and per-app folder cache layouts.
     public func artwork(_ id: Int, portraitOnly: Bool = false) -> URL? {
         let cache = paths.steamDir.appendingPathComponent("appcache/librarycache")
-        let candidates = ["library_600x900_2x.jpg", "library_600x900.jpg"]
+        let candidates = ["library_600x900_2x.jpg", "library_600x900.jpg", "library_capsule.jpg"]
             + (portraitOnly ? [] : ["header.jpg", "library_header.jpg"])
         let folder = cache.appendingPathComponent("\(id)")
         let fm = FileManager.default
@@ -82,8 +113,11 @@ public struct SteamLibrary: Sendable {
         return nil
     }
 
-    /// Public CDN fallback for artwork (no login needed).
-    public static func artworkCDN(_ id: Int) -> URL {
-        URL(string: "https://shared.steamstatic.com/store_item_assets/steam/apps/\(id)/library_600x900_2x.jpg")!
+    /// Public CDN fallbacks for artwork (no login needed), best first. Newer apps only have
+    /// the wide header at a predictable URL.
+    public static func artworkCDN(_ id: Int) -> [URL] {
+        ["library_600x900_2x.jpg", "header.jpg"].map {
+            URL(string: "https://shared.steamstatic.com/store_item_assets/steam/apps/\(id)/\($0)")!
+        }
     }
 }
